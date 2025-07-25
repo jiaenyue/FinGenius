@@ -151,6 +151,19 @@ class MCPSettings(BaseModel):
             raise ValueError(f"Failed to load MCP server config: {e}")
 
 
+from pydantic_settings import BaseSettings
+
+class DataProviderSettings(BaseSettings):
+    provider: str = Field("auto", description="Data provider to use (auto, akshare, tushare, or rqdata)")
+    tushare_token: Optional[str] = Field(None, description="Tushare API token", env="TUSHARE_TOKEN")
+    rqdata_username: Optional[str] = Field(None, description="RQData username", env="RQDATA_USERNAME")
+    rqdata_password: Optional[str] = Field(None, description="RQData password", env="RQDATA_PASSWORD")
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
 class AppConfig(BaseModel):
     llm: Dict[str, LLMSettings]
     browser_config: Optional[BrowserSettings] = Field(
@@ -161,6 +174,9 @@ class AppConfig(BaseModel):
     )
     mcp_config: Optional[MCPSettings] = Field(None, description="MCP configuration")
     tts_config: Optional[TTSSettings] = Field(None, description="TTS configuration")
+    data_provider_config: Optional[DataProviderSettings] = Field(
+        None, description="Data provider configuration"
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -276,6 +292,15 @@ class Config:
             # 创建默认TTS配置
             tts_settings = TTSSettings()
 
+        # 加载Data Provider配置
+        data_provider_config = raw_config.get("data_provider", {})
+        # We only pass the provider from the config file, so that tushare_token
+        # can be loaded from the environment variables.
+        provider_from_config = {}
+        if "provider" in data_provider_config:
+            provider_from_config["provider"] = data_provider_config["provider"]
+        data_provider_settings = DataProviderSettings(**provider_from_config)
+
         config_dict = {
             "llm": {
                 "default": default_settings,
@@ -288,9 +313,21 @@ class Config:
             "search_config": search_settings,
             "mcp_config": mcp_settings,
             "tts_config": tts_settings,
+            "data_provider_config": data_provider_settings,
         }
 
         self._config = AppConfig(**config_dict)
+
+    def get(self, key: str, default: any = None) -> any:
+        """Get a configuration value by key."""
+        if self._config and hasattr(self._config, key):
+            return getattr(self._config, key)
+        # Fallback for data_provider settings for now
+        if key == "data_provider":
+            return self._config.data_provider_config.provider
+        if key == "tushare_token":
+            return self._config.data_provider_config.tushare_token
+        return default
 
     @property
     def llm(self) -> Dict[str, LLMSettings]:

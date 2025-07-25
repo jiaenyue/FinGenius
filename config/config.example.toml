@@ -51,3 +51,7 @@ temperature = 0.0                           # Controls randomness
 # Google - 作为备选（需要良好的国际网络）
 # DuckDuckGo - 作为备选（需要良好的国际网络）
 engine = "Bing"
+
+# Data provider configuration
+[data_provider]
+provider = "akshare" # or "tushare"
