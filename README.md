@@ -156,6 +156,44 @@ FinGenius 需要配置使用的 LLM API，请按以下步骤设置：
    api_key = "sk-..."  # 替换为真实 API 密钥
    ```
 
+3. （可选）配置数据源：
+
+   FinGenius 支持多种数据源，并提供灵活的配置选项。
+
+   在 `config/config.toml` 文件中，您可以设置 `provider` 字段来选择数据源：
+
+   ```toml
+   # 数据源配置
+   [data_provider]
+   provider = "auto"  # 可选值: "auto", "tushare", "rqdata", "akshare"
+   ```
+
+   - **`provider`**:
+     - **`"auto"` (默认)**: 系统将自动尝试按以下顺序初始化可用的数据源：`tushare` -> `rqdata` -> `akshare`。它将使用第一个成功初始化的数据源。
+     - **`"tushare"`**: 强制使用 Tushare。
+     - **`"rqdata"`**: 强制使用 RQData。
+     - **`"akshare"`**: 强制使用 Akshare。
+
+   #### 凭证配置
+
+   对于 `tushare` 和 `rqdata`，您需要在项目的根目录下创建一个 `.env` 文件来配置您的凭证。您可以从 `.env.example` 文件复制并修改它。
+
+   - **Tushare**:
+     - 在 `.env` 文件中设置 `TUSHARE_TOKEN`。
+     - 您可以从 [tushare 官网](https://tushare.pro/) 获取 token。
+
+     ```
+     TUSHARE_TOKEN="your_tushare_token_here"
+     ```
+
+   - **RQData**:
+     - 在 `.env` 文件中设置 `RQDATA_USERNAME` 和 `RQDATA_PASSWORD`。
+
+     ```
+     RQDATA_USERNAME="your_rqdata_username"
+     RQDATA_PASSWORD="your_rqdata_password"
+     ```
+
 ## 使用方法
 
 一行命令运行 FinGenius：

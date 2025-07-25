@@ -1,12 +1,11 @@
 import asyncio
-import datetime
 from typing import Any, Dict
 
-import efinance as ef
 import pandas as pd
 from pydantic import Field
 
 from src.tool.base import BaseTool, ToolResult, get_recent_trading_day
+from src.tool.data_provider import get_data_provider
 
 
 class StockInfoResponse(ToolResult):
@@ -36,9 +35,6 @@ class StockInfoRequest(BaseTool):
         "required": ["stock_code"],
     }
 
-    MAX_RETRIES: int = 3
-    RETRY_DELAY: int = 1  # seconds
-
     async def execute(self, stock_code: str, **kwargs) -> StockInfoResponse | None:
         """
         Execute the tool to fetch stock information.
@@ -49,53 +45,38 @@ class StockInfoRequest(BaseTool):
         Returns:
             StockInfoResponse containing stock information and current trading date
         """
-        for attempt in range(1, self.MAX_RETRIES + 1):
-            try:
-                # Get current trading day
-                trading_day = get_recent_trading_day()
+        try:
+            # Get current trading day
+            trading_day = get_recent_trading_day()
 
-                # Fetch stock information
-                data = ef.stock.get_base_info(stock_code)
+            # Get data provider
+            data_provider = get_data_provider()
 
-                # Convert data to dict format based on its type
-                basic_info = self._format_data(data)
+            if data_provider is None:
+                return StockInfoResponse(error="Could not get a valid data provider.")
 
-                # Create and return the response
-                return StockInfoResponse(
-                    output={
-                        "current_trading_day": trading_day,
-                        "basic_info": basic_info,
-                    }
-                )
+            # Fetch stock information
+            basic_info = data_provider.get_stock_basic_info(stock_code)
 
-            except Exception as e:
-                if attempt < self.MAX_RETRIES:
-                    await asyncio.sleep(float(self.RETRY_DELAY))
-                return StockInfoResponse(
-                    error=f"获取股票信息失败 ({self.MAX_RETRIES}次尝试): {str(e)}"
-                )
+            if basic_info is None:
+                return StockInfoResponse(error="Failed to fetch stock basic info from any provider.")
 
-    @staticmethod
-    def _format_data(data: Any) -> Dict[str, Any]:
-        """
-        Format data to a JSON-serializable dictionary.
+            # Create and return the response
+            return StockInfoResponse(
+                output={
+                    "current_trading_day": trading_day,
+                    "basic_info": basic_info,
+                }
+            )
 
-        Args:
-            data: The data to format, typically from efinance
-
-        Returns:
-            A dictionary representation of the data
-        """
-        if isinstance(data, pd.DataFrame):
-            return data.to_dict(orient="records")[0] if len(data) > 0 else {}
-        elif isinstance(data, pd.Series):
-            return data.to_dict()
-        elif isinstance(data, dict):
-            return data
-        elif isinstance(data, (int, float, str, bool)):
-            return {"value": data}
-        else:
-            return {"value": str(data)}
+        except (ValueError, RuntimeError) as e:
+            return StockInfoResponse(
+                error=f"Data provider configuration error: {str(e)}"
+            )
+        except Exception as e:
+            return StockInfoResponse(
+                error=f"获取股票信息失败: {str(e)}"
+            )
 
 
 if __name__ == "__main__":
