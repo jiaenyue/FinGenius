@@ -83,49 +83,27 @@ class ResearchEnvironment(BaseEnvironment):
                         )
                         logger.info(f"Added basic stock info to {agent_key}'s context")
 
-            # Run analysis tasks sequentially with 3-second intervals
-            results = {}
-            agent_count = 0
-            total_agents = len([k for k in self.analysis_mapping.keys() if k in self.agents])
-            
-            # Import visualizer for progress display
-            try:
-                from src.console import visualizer
-                show_visual = True
-            except:
-                show_visual = False
-            
+            # Run analysis tasks concurrently with a semaphore for concurrency control
+            semaphore = asyncio.Semaphore(3)
+            tasks = []
+
+            async def run_with_semaphore(agent, stock_code):
+                async with semaphore:
+                    return await agent.run(stock_code)
+
             for agent_key, result_key in self.analysis_mapping.items():
-                if agent_key not in self.agents:
-                    continue
-                    
-                agent_count += 1
-                logger.info(f"🔄 Starting analysis with {agent_key} ({agent_count}/{total_agents})")
-                
-                # Show agent starting in terminal
-                if show_visual:
-                    visualizer.show_agent_starting(agent_key, agent_count, total_agents)
-                
-                try:
-                    # Run individual agent
-                    result = await self.agents[agent_key].run(stock_code)
+                if agent_key in self.agents:
+                    tasks.append(run_with_semaphore(self.agents[agent_key], stock_code))
+
+            task_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            results = {}
+            for (agent_key, result_key), result in zip(self.analysis_mapping.items(), task_results):
+                if isinstance(result, Exception):
+                    logger.error(f"❌ Error with {agent_key}: {str(result)}")
+                    results[result_key] = f"Error: {str(result)}"
+                else:
                     results[result_key] = result
-                    logger.info(f"✅ Completed analysis with {agent_key}")
-                    
-                    # Show agent completion in terminal
-                    if show_visual:
-                        visualizer.show_agent_completed(agent_key, agent_count, total_agents)
-                    
-                    # Wait 3 seconds before next agent (except for the last one)
-                    if agent_count < total_agents:
-                        logger.info(f"⏳ Waiting 3 seconds before next agent...")
-                        if show_visual:
-                            visualizer.show_waiting_next_agent(3)
-                        await asyncio.sleep(3)
-                        
-                except Exception as e:
-                    logger.error(f"❌ Error with {agent_key}: {str(e)}")
-                    results[result_key] = f"Error: {str(e)}"
 
             if not results:
                 return {
