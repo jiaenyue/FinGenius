@@ -282,22 +282,56 @@ class CreateHtmlTool(BaseTool):
             raise
 
     def _extract_html_code(self, response: str) -> str:
-        """Extract HTML code from LLM response"""
-        # Check for code block
-        if "```html" in response and "```" in response.split("```html", 1)[1]:
-            code_block = response.split("```html", 1)[1].split("```", 1)[0]
-            return self._fix_encoding(code_block.strip())
+        """Extract HTML code from LLM response with enhanced parsing"""
+        logger.info(f"Extracting HTML from response, length: {len(response)}")
         
-        # Check for direct HTML response
-        elif "<!DOCTYPE" in response or "<html" in response:
-            start_pos = response.find("<!DOCTYPE")
-            if start_pos == -1:
-                start_pos = response.find("<html")
-
+        # Method 1: Check for HTML code block with various formats
+        html_block_patterns = [
+            r"```html\s*\n(.*?)\n```",
+            r"```HTML\s*\n(.*?)\n```", 
+            r"```\s*html\s*\n(.*?)\n```",
+            r"```\s*\n(<!DOCTYPE.*?)\n```",
+        ]
+        
+        for pattern in html_block_patterns:
+            match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
+            if match:
+                html_content = match.group(1).strip()
+                logger.info(f"Found HTML in code block using pattern: {pattern[:20]}...")
+                return self._fix_encoding(html_content)
+        
+        # Method 2: Look for direct HTML content
+        html_start_patterns = [
+            r"(<!DOCTYPE\s+html.*)",
+            r"(<html[^>]*>.*)",
+            r"(<!doctype\s+html.*)"
+        ]
+        
+        for pattern in html_start_patterns:
+            match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
+            if match:
+                html_content = match.group(1).strip()
+                logger.info(f"Found direct HTML using pattern: {pattern[:20]}...")
+                return self._fix_encoding(html_content)
+        
+        # Method 3: Fallback - look for any HTML-like content
+        if "<html" in response.lower() or "<!doctype" in response.lower():
+            # Find the start position
+            start_markers = ["<!DOCTYPE", "<!doctype", "<html", "<HTML"]
+            start_pos = -1
+            for marker in start_markers:
+                pos = response.find(marker)
+                if pos != -1:
+                    start_pos = pos
+                    break
+            
             if start_pos != -1:
-                return self._fix_encoding(response[start_pos:].strip())
-
-        # Return full response if no clear HTML markers found
+                html_content = response[start_pos:].strip()
+                logger.info(f"Found HTML using fallback method at position {start_pos}")
+                return self._fix_encoding(html_content)
+        
+        # Method 4: Last resort - return full response
+        logger.warning("No clear HTML structure found, returning full response")
         return self._fix_encoding(response)
     
     def _sanitize_data_for_js(self, data: Any) -> Any:
@@ -307,122 +341,262 @@ class CreateHtmlTool(BaseTool):
         elif isinstance(data, list):
             return [self._sanitize_data_for_js(item) for item in data]
         elif isinstance(data, str):
-            # Clean up problematic characters and content
-            sanitized = data.replace('\n', ' ').replace('\r', ' ')
-            sanitized = sanitized.replace('"', '\"').replace("'", "\'") 
-            # Truncate extremely long strings that might contain raw content
-            if len(sanitized) > 1000:
-                sanitized = sanitized[:997] + "..."
-            return sanitized
+            # Only truncate extremely long strings, let json.dumps handle escaping
+            if len(data) > 20000:  # 增加长度限制，避免过度截断
+                return data[:19977] + "..."
+            return data
         else:
             return data
     
     def _inject_data_into_html(self, html_content: str, data: Dict[str, Any]) -> str:
-        """Inject data into HTML template with enhanced duplicate prevention"""
+        """Inject data into HTML template with enhanced robustness and validation"""
         try:
             import json
+            logger.info("Starting data injection into HTML...")
+            
             # Sanitize data first to prevent injection issues
             sanitized_data = self._sanitize_data_for_js(data)
+            logger.info(f"Data sanitized, keys: {list(sanitized_data.keys()) if isinstance(sanitized_data, dict) else 'non-dict'}")
+            
             # Properly serialize data with safe escaping for JavaScript injection
-            safe_data = json.dumps(sanitized_data, ensure_ascii=True, indent=2, separators=(',', ': '))
+            safe_data = json.dumps(
+                sanitized_data, 
+                ensure_ascii=True,  # 确保非ASCII字符被转义
+                indent=2, 
+                separators=(',', ': '),
+                sort_keys=True  # 排序键值
+            )
+            logger.info(f"Data serialized to JSON, length: {len(safe_data)}")
+            
             injection_success = False
             
-            # 首先检查是否已经存在reportData变量声明
+            # 更健壮的现有数据检测
             existing_patterns = [
-                r'let\s+reportData\s*=',
-                r'const\s+reportData\s*=', 
-                r'var\s+reportData\s*=',
-                r'window\.pageData\s*='
+                r'\b(?:let|const|var)\s+reportData\s*=',
+                r'window\.(?:pageData|reportData)\s*='
             ]
             
-            has_existing_data = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in existing_patterns)
+            existing_matches = []
+            for pattern in existing_patterns:
+                matches = re.findall(pattern, html_content, re.IGNORECASE)
+                existing_matches.extend(matches)
+            
+            has_existing_data = len(existing_matches) > 0
+            logger.info(f"Existing data declarations found: {len(existing_matches)} - {existing_matches}")
             
             if has_existing_data:
-                logger.info("Found existing reportData declaration, attempting replacement...")
-                # 尝试替换现有的数据声明
+                logger.info("Attempting to replace existing data declarations...")
+                
+                # 更精确的替换模式，支持多行和复杂对象
                 replacement_patterns = [
-                    (r'(let\s+reportData\s*=\s*)\{[^}]*\}(\s*;?)', f'\\1{safe_data}\\2'),
-                    (r'(const\s+reportData\s*=\s*)\{[^}]*\}(\s*;?)', f'\\1{safe_data}\\2'),
-                    (r'(var\s+reportData\s*=\s*)\{[^}]*\}(\s*;?)', f'\\1{safe_data}\\2'),
-                    (r'(window\.pageData\s*=\s*)\{[^}]*\}(\s*;?)', f'\\1{safe_data}\\2'),
+                    # 匹配 const/let/var reportData = { ... }; 格式
+                    (r'(\b(?:const|let|var)\s+reportData\s*=\s*)\{[\s\S]*?\}(\s*;?)', f'\\1{safe_data}\\2'),
+                    # 匹配 window.pageData = { ... }; 格式
+                    (r'(window\.(?:pageData|reportData)\s*=\s*)\{[\s\S]*?\}(\s*;?)', f'\\1{safe_data}\\2'),
+                    # 匹配注释格式的占位符
+                    (r'(\b(?:const|let|var)\s+reportData\s*=\s*)\{\}(\s*;?\s*//[^\n]*)', f'\\1{safe_data}\\2'),
                 ]
                 
-                for pattern, replacement in replacement_patterns:
-                    if re.search(pattern, html_content, re.DOTALL):
-                        html_content = re.sub(pattern, replacement, html_content, count=1, flags=re.DOTALL)
-                        logger.info(f"Successfully replaced existing data using pattern: {pattern}")
+                for i, (pattern, replacement) in enumerate(replacement_patterns):
+                    matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                    if matches:
+                        logger.info(f"Pattern {i+1} matched {len(matches)} times: {pattern[:50]}...")
+                        html_content = re.sub(pattern, replacement, html_content, count=1, flags=re.DOTALL | re.IGNORECASE)
+                        logger.info(f"Successfully replaced existing data using pattern {i+1}")
                         injection_success = True
                         break
+                
             else:
-                logger.info("No existing reportData found, attempting fresh injection...")
-                # 尝试在空的占位符中注入数据
+                logger.info("No existing data found, attempting fresh injection...")
+                
+                # 更全面的注入点查找
                 injection_patterns = [
-                    (r'let reportData = \{\};', f'let reportData = {safe_data};'),
-                    (r'const reportData = \{\};', f'const reportData = {safe_data};'),
-                    (r'var reportData = \{\};', f'var reportData = {safe_data};'),
-                    (r'window\.pageData = \{\};', f'window.pageData = {safe_data};'),
-                    # 添加对模板中新格式的支持
-                    (r'const reportData = \{\}; // 这个会被实际的JSON数据替换', f'const reportData = {safe_data}; // 实际数据已注入'),
+                    # 空对象占位符
+                    (r'\b(const|let|var)\s+reportData\s*=\s*\{\}\s*;', f'\\1 reportData = {safe_data};'),
+                    (r'window\.(pageData|reportData)\s*=\s*\{\}\s*;', f'window.\\1 = {safe_data};'),
+                    # 带注释的占位符
+                    (r'(\b(?:const|let|var)\s+reportData\s*=\s*)\{\}(\s*;?\s*//[^\n]*)', f'\\1{safe_data}\\2'),
+                    # 模板中的特殊注释
+                    (r'//\s*页面数据注入点[^\n]*\n', f'// 页面数据注入点\n        const reportData = {safe_data};\n'),
                 ]
                 
-                for pattern, replacement in injection_patterns:
-                    if re.search(pattern, html_content):
-                        html_content = re.sub(pattern, replacement, html_content, count=1)
-                        logger.info(f"Successfully injected data using pattern: {pattern}")
+                for i, (pattern, replacement) in enumerate(injection_patterns):
+                    matches = re.findall(pattern, html_content, re.IGNORECASE)
+                    if matches:
+                        logger.info(f"Injection pattern {i+1} matched {len(matches)} times: {pattern[:50]}...")
+                        html_content = re.sub(pattern, replacement, html_content, count=1, flags=re.IGNORECASE)
+                        logger.info(f"Successfully injected data using pattern {i+1}")
                         injection_success = True
                         break
             
-            # 最后的fallback：只有在完全没有找到任何数据变量时才执行
-            if not injection_success and not has_existing_data:
-                logger.warning("No data injection point found in HTML. Attempting fallback injection.")
-                script_start = html_content.find("<script>")
-                if script_start != -1:
-                    insertion_point = script_start + len("<script>")
-                    data_injection = f"\n        // 页面数据全局变量 - 实际数据注入\n        let reportData = {safe_data};\n"
-                    html_content = html_content[:insertion_point] + data_injection + html_content[insertion_point:]
-                    logger.info("Successfully injected data using fallback method")
-                    injection_success = True
-            
+            # 增强的fallback机制
             if not injection_success:
-                logger.error("Failed to find any suitable injection point for data")
-            else:
-                # 验证注入后没有重复声明
-                reportdata_count = len(re.findall(r'\b(?:let|const|var)\s+reportData\s*=', html_content, re.IGNORECASE))
-                if reportdata_count > 1:
-                    logger.error(f"WARNING: Found {reportdata_count} reportData declarations after injection!")
+                logger.warning("Standard injection failed, attempting enhanced fallback...")
+                
+                # 查找所有可能的script标签
+                script_patterns = [
+                    r'<script[^>]*>\s*',  # 任何script标签开始
+                    r'<script>\s*',       # 简单script标签
+                ]
+                
+                for pattern in script_patterns:
+                    match = re.search(pattern, html_content, re.IGNORECASE)
+                    if match:
+                        insertion_point = match.end()
+                        data_injection = f"\n        // 页面数据全局变量 - 自动注入\n        const reportData = {safe_data};\n"
+                        html_content = html_content[:insertion_point] + data_injection + html_content[insertion_point:]
+                        logger.info(f"Successfully injected data using fallback at position {insertion_point}")
+                        injection_success = True
+                        break
+            
+            # 最终验证
+            if injection_success:
+                # 检查重复声明
+                reportdata_declarations = re.findall(r'\b(?:let|const|var)\s+reportData\s*=', html_content, re.IGNORECASE)
+                window_declarations = re.findall(r'window\.(?:pageData|reportData)\s*=', html_content, re.IGNORECASE)
+                
+                total_declarations = len(reportdata_declarations) + len(window_declarations)
+                
+                if total_declarations > 1:
+                    logger.error(f"⚠️ Multiple data declarations detected: {total_declarations} (reportData: {len(reportdata_declarations)}, window: {len(window_declarations)})")
+                    # 尝试清理重复声明
+                    html_content = self._cleanup_duplicate_declarations(html_content)
                 else:
-                    logger.info(f"✅ Data injection successful, found {reportdata_count} reportData declaration(s)")
+                    logger.info(f"✅ Data injection successful, total declarations: {total_declarations}")
+                
+                # 验证JSON格式
+                try:
+                    json.loads(safe_data)
+                    logger.info("✅ Injected data is valid JSON")
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Injected data is invalid JSON: {e}")
+                    
+            else:
+                logger.error("❌ All injection methods failed")
                 
             return html_content
             
         except Exception as e:
             logger.error(f"Failed to inject data into HTML: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return html_content
 
     def _fix_encoding(self, html_content: str) -> str:
-        """Fix potential encoding issues in HTML content"""
+        """Fix potential encoding issues in HTML content with enhanced validation"""
         try:
-            # Ensure <meta charset> tag exists and is UTF-8
-            if "<meta charset=" in html_content.lower():
+            logger.info("Starting HTML encoding fix...")
+            
+            # Check if charset already exists and is correct
+            charset_pattern = r'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)["\']?[^>]*>'
+            charset_matches = re.findall(charset_pattern, html_content, re.IGNORECASE)
+            
+            if charset_matches:
+                logger.info(f"Found existing charset declarations: {charset_matches}")
+                # Remove all existing charset declarations first
                 html_content = re.sub(
-                    r'<meta\s+charset=["\']?[^"\'>\s]+["\']?',
-                    '<meta charset="UTF-8">',
+                    r'<meta\s+charset\s*=\s*["\']?[^"\'>\s]+["\']?[^>]*>',
+                    '',
                     html_content,
-                    flags=re.IGNORECASE,
+                    flags=re.IGNORECASE
                 )
-            else:
-                # Add charset tag after <head> if it doesn't exist
+                logger.info("Removed existing charset declarations")
+            
+            # Add single UTF-8 charset declaration after <head>
+            head_pattern = r'(<head[^>]*>)'
+            if re.search(head_pattern, html_content, re.IGNORECASE):
                 html_content = re.sub(
-                    r"(<head[^>]*>)",
+                    head_pattern,
                     r'\1\n    <meta charset="UTF-8">',
                     html_content,
-                    flags=re.IGNORECASE,
+                    count=1,  # Only replace the first occurrence
+                    flags=re.IGNORECASE
                 )
-
+                logger.info("Added UTF-8 charset declaration after <head>")
+            else:
+                logger.warning("No <head> tag found, cannot add charset declaration")
+            
+            # Validate the result
+            final_charset_count = len(re.findall(charset_pattern, html_content, re.IGNORECASE))
+            logger.info(f"Final charset declaration count: {final_charset_count}")
+            
+            if final_charset_count > 1:
+                logger.warning(f"Multiple charset declarations detected: {final_charset_count}")
+            
             return html_content
+            
         except Exception as e:
             logger.error(f"Error fixing HTML encoding: {e}")
             return html_content
+
+    def _cleanup_duplicate_declarations(self, html_content: str) -> str:
+        """Clean up duplicate reportData declarations"""
+        try:
+            logger.info("Cleaning up duplicate data declarations...")
+            
+            # Find all reportData declarations
+            reportdata_pattern = r'\b(const|let|var)\s+reportData\s*=\s*\{[\s\S]*?\}\s*;?'
+            window_pattern = r'window\.(pageData|reportData)\s*=\s*\{[\s\S]*?\}\s*;?'
+            
+            reportdata_matches = list(re.finditer(reportdata_pattern, html_content, re.IGNORECASE))
+            window_matches = list(re.finditer(window_pattern, html_content, re.IGNORECASE))
+            
+            logger.info(f"Found {len(reportdata_matches)} reportData declarations and {len(window_matches)} window declarations")
+            
+            # Keep only the first reportData declaration
+            if len(reportdata_matches) > 1:
+                # Remove all but the first
+                for match in reversed(reportdata_matches[1:]):
+                    start, end = match.span()
+                    html_content = html_content[:start] + html_content[end:]
+                    logger.info(f"Removed duplicate reportData declaration at position {start}-{end}")
+            
+            # Keep only the first window declaration
+            if len(window_matches) > 1:
+                # Remove all but the first
+                for match in reversed(window_matches[1:]):
+                    start, end = match.span()
+                    html_content = html_content[:start] + html_content[end:]
+                    logger.info(f"Removed duplicate window declaration at position {start}-{end}")
+            
+            return html_content
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up duplicate declarations: {e}")
+            return html_content
+    
+    def _validate_html_structure(self, html_content: str) -> bool:
+        """Validate basic HTML structure"""
+        try:
+            # Check for basic HTML structure
+            has_doctype = bool(re.search(r'<!DOCTYPE\s+html', html_content, re.IGNORECASE))
+            has_html_tag = bool(re.search(r'<html[^>]*>', html_content, re.IGNORECASE))
+            has_head_tag = bool(re.search(r'<head[^>]*>', html_content, re.IGNORECASE))
+            has_body_tag = bool(re.search(r'<body[^>]*>', html_content, re.IGNORECASE))
+            has_charset = bool(re.search(r'<meta\s+charset', html_content, re.IGNORECASE))
+            
+            validation_results = {
+                'doctype': has_doctype,
+                'html_tag': has_html_tag,
+                'head_tag': has_head_tag,
+                'body_tag': has_body_tag,
+                'charset': has_charset
+            }
+            
+            logger.info(f"HTML structure validation: {validation_results}")
+            
+            # All should be True for valid HTML
+            is_valid = all(validation_results.values())
+            
+            if not is_valid:
+                missing = [k for k, v in validation_results.items() if not v]
+                logger.warning(f"HTML structure validation failed, missing: {missing}")
+            
+            return is_valid
+            
+        except Exception as e:
+            logger.error(f"Error validating HTML structure: {e}")
+            return False
 
     def _is_report_path(self, filepath: str) -> bool:
         """检查是否为报告路径"""
@@ -494,7 +668,7 @@ class CreateHtmlTool(BaseTool):
         additional_requirements: str = "",
         **kwargs,
     ) -> ToolResult:
-        """Execute HTML generation operation
+        """Execute HTML generation operation with enhanced error handling and validation
 
         Args:
             request: Detailed description of the HTML page requirements
@@ -507,49 +681,105 @@ class CreateHtmlTool(BaseTool):
             ToolResult: Result containing the generated HTML or error message
         """
         try:
+            logger.info(f"Starting HTML generation for request: {request[:100]}...")
+            
+            # Validate input parameters
+            if not request or not request.strip():
+                raise ValueError("Request cannot be empty")
+            
             # Prepare additional context
             additional_context = {}
             if data:
                 additional_context["data"] = data
+                logger.info(f"Data provided with keys: {list(data.keys()) if isinstance(data, dict) else 'non-dict'}")
             if reference:
                 additional_context["reference"] = reference
+                logger.info("Reference design provided")
             if additional_requirements:
                 additional_context["requirements"] = additional_requirements
+                logger.info("Additional requirements provided")
 
             # Generate HTML
+            logger.info("Generating HTML content...")
             html_content = await self._generate_html(
                 request=request,
                 additional_context=additional_context if additional_context else None,
             )
             
+            if not html_content or not html_content.strip():
+                raise ValueError("Generated HTML content is empty")
+            
+            logger.info(f"HTML generated successfully, length: {len(html_content)}")
+            
+            # Validate HTML structure
+            is_valid_structure = self._validate_html_structure(html_content)
+            if not is_valid_structure:
+                logger.warning("Generated HTML has structural issues, but proceeding...")
+            
             # Inject data into HTML if available
             if data:
+                logger.info("Injecting data into HTML...")
+                original_length = len(html_content)
                 html_content = self._inject_data_into_html(html_content, data)
+                logger.info(f"Data injection completed, length change: {len(html_content) - original_length}")
+            
+            # Final validation
+            final_validation = self._validate_html_structure(html_content)
+            logger.info(f"Final HTML validation: {'✅ PASSED' if final_validation else '⚠️ ISSUES DETECTED'}")
 
             # Save to file if path provided
             result_message = ""
             if output_path:
-                # 优先使用报告管理器保存
-                if self._is_report_path(output_path):
-                    save_result = self._save_with_report_manager(
-                        html_content, output_path, data
-                    )
-                else:
-                    save_result = await self._save_html_to_file(
-                        html_content=html_content, filepath=output_path
-                    )
-                result_message = f"\n{save_result}"
+                logger.info(f"Saving HTML to: {output_path}")
+                try:
+                    # 优先使用报告管理器保存
+                    if self._is_report_path(output_path):
+                        save_result = self._save_with_report_manager(
+                            html_content, output_path, data
+                        )
+                    else:
+                        save_result = await self._save_html_to_file(
+                            html_content=html_content, filepath=output_path
+                        )
+                    result_message = f"\n{save_result}"
+                    logger.info(f"File saved successfully: {save_result}")
+                except Exception as save_error:
+                    logger.error(f"Failed to save file: {save_error}")
+                    result_message = f"\nWarning: Failed to save file - {save_error}"
 
+            # Prepare success result
+            success_message = f"HTML generation successful, length: {len(html_content)} characters"
+            if not final_validation:
+                success_message += " (with structural warnings)"
+            success_message += result_message
+            
+            logger.info("HTML generation completed successfully")
+            
             # Return success result
             return ToolResult(
                 output={
                     "html_content": html_content,
                     "saved_to": output_path if output_path else None,
-                    "message": f"HTML generation successful, length: {len(html_content)} characters{result_message}",
+                    "message": success_message,
+                    "validation_passed": final_validation,
+                    "content_length": len(html_content)
                 }
             )
 
         except Exception as e:
             error_msg = f"HTML generation failed: {str(e)}"
             logger.error(error_msg)
-            return ToolResult(error=error_msg)
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Return detailed error information
+            return ToolResult(
+                error=error_msg,
+                output={
+                    "error_type": type(e).__name__,
+                    "error_details": str(e),
+                    "request_length": len(request) if request else 0,
+                    "has_data": bool(data),
+                    "output_path": output_path
+                }
+            )

@@ -69,7 +69,7 @@
 
 欢迎对AI金融极致热爱的你
 
-携手完善[FinGenius](https://fingenius.cn)，共同探索金融智能分析的技术前沿边界！🌟
+携手完善FinGenius，共同探索金融智能分析的技术前沿边界！🌟
 
 
 ## 安装指南
@@ -88,7 +88,7 @@
 2. 克隆仓库：
 
    ```bash
-   git clone https://github.com/huayaoyuanjin/FinGenius.git
+   git clone https://github.com/HuaYaoAI/FinGenius.git
    cd FinGenius
    ```
 
@@ -109,7 +109,7 @@
 2. 克隆仓库：
 
    ```bash
-   git clone https://github.com/huayaoyuanjin/FinGenius.git
+   git clone https://github.com/HuaYaoAI/FinGenius.git
    cd FinGenius
    ```
 

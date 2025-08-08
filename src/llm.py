@@ -30,7 +30,31 @@ from src.schema import (
 )
 
 
-REASONING_MODELS = ["o1", "o3-mini"]
+# 推理模型列表 - 这些模型使用不同的参数格式
+REASONING_MODELS = ["o1", "o3-mini", "deepseek-r1"]
+
+# 检查是否为推理模型的函数
+def is_reasoning_model(model_name: str) -> bool:
+    """检查模型是否为推理模型"""
+    if not model_name:
+        return False
+    
+    # 直接匹配
+    if model_name in REASONING_MODELS:
+        return True
+    
+    # 模糊匹配推理模型模式
+    reasoning_patterns = [
+        "o1", "o3", "deepseek-r1", "qwen-r1", 
+        "reasoning", "think", "cot"  # Chain of Thought
+    ]
+    
+    model_lower = model_name.lower()
+    for pattern in reasoning_patterns:
+        if pattern in model_lower:
+            return True
+    
+    return False
 
 
 class TokenCounter:
@@ -363,9 +387,20 @@ class LLM:
                 "messages": messages,
             }
 
-            if self.model in REASONING_MODELS:
+            # 对于ollama，使用统一的参数格式避免400错误
+            if self.api_type == "ollama":
+                # Ollama使用标准的OpenAI参数格式
+                params["max_tokens"] = self.max_tokens
+                params["temperature"] = (
+                    temperature if temperature is not None else self.temperature
+                )
+                logger.info(f"Using Ollama-compatible parameters: max_tokens={self.max_tokens}, temperature={params['temperature']}")
+            elif is_reasoning_model(self.model):
+                # 只有非Ollama的推理模型才使用max_completion_tokens
                 params["max_completion_tokens"] = self.max_tokens
+                logger.info(f"Using reasoning model parameters: max_completion_tokens={self.max_tokens}")
             else:
+                # 标准模型参数
                 params["max_tokens"] = self.max_tokens
                 params["temperature"] = (
                     temperature if temperature is not None else self.temperature
@@ -540,6 +575,10 @@ class LLM:
 
             # Handle non-streaming request
             if not stream:
+                # 针对Ollama的特殊处理：确保使用正确的参数
+                if self.api_type == "ollama":
+                    params["stream"] = False
+                    
                 response = await self.client.chat.completions.create(**params)
 
                 if not response.choices or not response.choices[0].message.content:
@@ -547,24 +586,27 @@ class LLM:
 
                 self.update_token_count(response.usage.prompt_tokens)
                 return response.choices[0].message.content
+            else:
+                # Handle streaming request - 改善Ollama流式请求处理
+                if self.api_type == "ollama":
+                    params["stream"] = True
+                    
+                self.update_token_count(input_tokens)
+                response = await self.client.chat.completions.create(**params)
 
-            # Handle streaming request
-            self.update_token_count(input_tokens)
-            response = await self.client.chat.completions.create(**params)
+                collected_messages = []
+                async for chunk in response:
+                    chunk_message = chunk.choices[0].delta.content or ""
+                    collected_messages.append(chunk_message)
+                    print(chunk_message, end="", flush=True)
 
-            collected_messages = []
-            async for chunk in response:
-                chunk_message = chunk.choices[0].delta.content or ""
-                collected_messages.append(chunk_message)
-                print(chunk_message, end="", flush=True)
+                print()  # Newline after streaming
+                full_response = "".join(collected_messages).strip()
 
-            print()  # Newline after streaming
-            full_response = "".join(collected_messages).strip()
+                if not full_response:
+                    raise ValueError("Empty response from streaming LLM")
 
-            if not full_response:
-                raise ValueError("Empty response from streaming LLM")
-
-            return full_response
+                return full_response
 
         except TokenLimitExceeded:
             raise
